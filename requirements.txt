@@ -1,0 +1,6 @@
+networkx
+numpy
+matplotlib
+scipy
+pandas
+gurobipy  # For SeedMix baseline
