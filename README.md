@@ -5,7 +5,7 @@ This repository contains the source code, benchmarking pipeline, and dataset pro
 ## Overview
 Identifying dense, disease-specific subnetworks within large protein-protein interaction (PPI) networks is crucial for unraveling complex disease mechanisms. While exact global optimization methods, such as Mixed-Integer Quadratic Programming (MIQP), provide rigorous mathematical guarantees, they suffer from a severe $O(N^2)$ combinatorial explosion on modern, dense human interactomes. 
 
-**Seed-Guided Simulated Annealing (SGSA)** is a highly scalable stochastic metaheuristic that bypasses global matrix evaluations entirely. By initiating from a validated set of disease seeds and dynamically exploring local topological neighborhoods, SGSA balances signal enrichment against a strict size penalty to successfully escape local optima. 
+**Seed-Guided Simulated Annealing (SGSA)** is a highly scalable stochastic metaheuristic that entirely bypasses global matrix evaluations. By initiating from a validated set of disease seeds and dynamically exploring local topological neighborhoods, SGSA balances signal enrichment against a strict size penalty to successfully escape local optima. 
 
 In a comprehensive empirical benchmark across 102 curated diseases on the 12,000-node IntAct interactome, SGSA demonstrated superior biological signal recovery, significantly outperforming classic topological traversals (DIAMOnD), deep learning frameworks (GNN-SubNet), and exact optimization relaxations (SeedMix).
 
@@ -22,3 +22,10 @@ Clone the repository and install the required dependencies:
 git clone [https://github.com/bebeklab/SeedGuided.git](https://github.com/bebeklab/SeedGuided.git)
 cd SeedGuided
 pip install -r requirements.txt
+
+
+
+
+## License and Copyright
+© 2026 Gurkan Bebek. All Rights Reserved. 
+This code is provided for peer-review purposes only. No license is granted for reproduction, distribution, or modification of this code without explicit written permission.
