@@ -28,7 +28,7 @@ import numpy as np
 import concurrent.futures
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 
-from pipeline.wrappers import run_sgsa, run_random_baseline, run_diamond, run_gnn_subnet, run_seedmix
+from pipeline.wrappers import run_sgsa, run_sgsa_multirun, run_random_baseline, run_diamond, run_gnn_subnet, run_seedmix
 
 
 def load_data_OMNI_STRING():
@@ -152,10 +152,11 @@ def evaluate_single_disease(args):
     # 2. Run each algorithm
     for algo_name, algo_func in algorithms.items():
         try:
-            if algo_name in ["SeedMix", "GNN-SubNet"]:
-                # Pass both known and hidden seeds to data-driven methods
+            if algo_name == "SeedMix":
+                # SeedMix uses hidden_seeds only for realistic p-value simulation (not as labels)
                 scores_dict = algo_func(network, known_seeds, hidden_seeds=hidden_seeds, disease_name=disease_name)
             else:
+                # All other methods — including GNN-SubNet — see only known seeds (no leakage)
                 scores_dict = algo_func(network, known_seeds)
                 
                 
@@ -201,7 +202,7 @@ def main():
     algorithms = {
         "Random Baseline": run_random_baseline,
         "DIAMOnD": run_diamond,
-        "SGSA (Yours)": run_sgsa,
+        "SGSA (Yours)": run_sgsa_multirun,  # multi-run averaged for variance stability
         "GNN-SubNet": run_gnn_subnet,
         "SeedMix": run_seedmix
     }
@@ -213,7 +214,7 @@ def main():
     tasks = [(i + 1, total_tasks, disease, seeds, network, algorithms) for i, (disease, seeds) in enumerate(diseases.items())]
     
     # Spin up the parallel processes. 
-    max_cores = min(25, len(diseases)) 
+    max_cores = min(15, len(diseases)) 
     
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_cores) as executor:
         for disease_results in executor.map(evaluate_single_disease, tasks):
@@ -227,7 +228,31 @@ def main():
     print("\n" + "="*50)
     print("BENCHMARK COMPLETE!")
     print("="*50)
-    print(results_df.groupby("Algorithm")[["ROC_AUC", "PR_AUC", "F1_Score"]].mean())
+    summary = results_df.groupby("Algorithm")[["ROC_AUC", "PR_AUC", "F1_Score"]]
+    means = summary.mean().round(3)
+    stds = summary.std().round(3)
+    counts = summary.count()
+
+    print("\nMean Performance:")
+    print(means.to_string())
+    print("\nStd Dev across diseases:")
+    print(stds.to_string())
+    print("\n95% Confidence Intervals (mean ± 1.96*std/sqrt(n)):")
+    import math
+    for algo in means.index:
+        n = counts.loc[algo, "ROC_AUC"]
+        for metric in ["ROC_AUC", "PR_AUC", "F1_Score"]:
+            m = means.loc[algo, metric]
+            s = stds.loc[algo, metric]
+            ci = 1.96 * s / math.sqrt(n)
+            print(f"  {algo:<22} {metric}: {m:.3f} ± {ci:.3f}")
+
+    print("\nPer-Disease Variance (ROC_AUC):")
+    per_disease = results_df.pivot_table(index="Disease", columns="Algorithm", values="ROC_AUC")
+    print(per_disease.var().round(4).to_string())
+
+    print("\nFull Per-Disease Results:")
+    print(results_df.pivot_table(index="Disease", columns="Algorithm", values="ROC_AUC").round(3).to_string())
 
 if __name__ == "__main__":
     main()

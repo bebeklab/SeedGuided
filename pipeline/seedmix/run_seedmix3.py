@@ -1,3 +1,5 @@
+import sys
+sys.path.insert(0, "/home/rxg796/netmix2")
 import argparse
 import csv
 import pandas as pd
@@ -14,8 +16,8 @@ from src.common import (
     post_process_zscores, correct_nans_from_locfdr, compute_ppr_kernel
 )
 
-# Import netmix functions from your netmix3.py file
-from src.netmix3 import netmix_edgedense, netmix_cut # Assuming both are in netmix3.py
+# Import netmix functions from your netmix2.py file
+from src.netmix2 import netmix_edgedense, netmix_cut # Assuming both are in netmix2.py
 
 
 # Parse arguments
@@ -50,7 +52,7 @@ def get_parser():
     parser.add_argument('--edge_dense_linear', action='store_true', help='Use linear edge density constraint (requires Gurobi 9+).')
     # parser.add_argument('--gurobi_method', required=False, type=int, help='Gurobi Method parameter.')
     parser.add_argument('--thread_count', required=False, type=int, help='Gurobi Threads parameter.')
-    # parser.add_argument('--mipgap', required=False, type=float, help='Gurobi MIPGap parameter.')
+    parser.add_argument("--mipgap", required=False, type=float, default=0.05, help="Gurobi MIPGap parameter.")
 
 
     return parser
@@ -126,7 +128,7 @@ def run(args):
     ###########################################################
     # 5. Compute zscores (used as responses for NetMix)
     zscores = compute_zscores(pvals_list)
-    resps = post_process_zscores(zscores, verbosity) # Use post-processed z-scores as responses
+    resps = post_process_zscores(zscores) # Use post-processed z-scores as responses
 
     ###########################################################
     # 6. Fit local fdr (if needed for other purposes, not directly used in netmix objective here)
@@ -294,15 +296,14 @@ def run(args):
         sim_mat_delta, # Use G_delta as the network for optimization
         rho_for_netmix, # Pass the target density value
         resps,
-        seed_nodes=seed_node_indices, # Pass the mapped seed indices
         alpha=alpha, # Pass alpha (used for initial clique size calculation)
         edge_dense_quad=args.edge_dense_quad,      # <-- Uses the command line
         edge_dense_linear=args.edge_dense_linear,  # <-- Uses the command line       
         output=gurobi_output,
         time_limit=3600*args.time_limit, # Convert hours to seconds
         method=None, # Pass Gurobi method if added to args
-        thread_count=None, # Pass Gurobi threads if added to args
-        mipgap=None # Pass Gurobi mipgap if added to args
+        thread_count=args.thread_count, # Wired from CLI
+        mipgap=args.mipgap # Wired from CLI, default 0.05
     )
 
     if est_subnetwork_indices is None: # Handle potential None return from netmix

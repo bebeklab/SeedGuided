@@ -1,4 +1,5 @@
 import numpy as np
+import time
 from gurobipy import *
 
 # --- seedmix Optimization Functions ---
@@ -83,6 +84,12 @@ def seedmix_edgedense(A, rho, resps, seed_nodes=None, alpha=0.05, edge_dense_qua
         for seed_node_idx in valid_seed_nodes:
              m.addConstr(x[seed_node_idx] == 1, name=f"force_seed_{seed_node_idx}")
 
+
+    # Warm start: initialize with seed nodes selected, everything else 0
+    # Gives Gurobi a feasible starting solution so it improves rather than searches from scratch
+    for i in vertex_inds:
+        x[i].Start = 1.0 if i in valid_seed_nodes else 0.0
+
     # create objective: Maximize the sum of responses for selected nodes
     # Ensure resps is a dictionary or can be accessed by index
     if isinstance(resps, np.ndarray) or isinstance(resps, list):
@@ -125,11 +132,13 @@ def seedmix_edgedense(A, rho, resps, seed_nodes=None, alpha=0.05, edge_dense_qua
 
     # Optimize model
     try:
+        _t0 = time.time()
         m.optimize()
-        # Check optimization status
-        #OLD        if m.Status == GRB.OPTIMAL or m.Status == GRB.FEASIBLE:
+        _elapsed = time.time() - _t0
+        _status_str = "OPTIMAL" if m.Status == GRB.OPTIMAL else "TIME_LIMIT" if m.Status == GRB.TIME_LIMIT else f"STATUS_{m.Status}"
+        _mipgap = f"{m.MIPGap*100:.2f}%" if m.SolCount > 0 else "N/A"
+        print(f"  [Gurobi edgedense] time={_elapsed:.1f}s | status={_status_str} | gap={_mipgap} | solutions={m.SolCount}", flush=True)
         if m.Status == GRB.OPTIMAL or m.Status == GRB.TIME_LIMIT:
-            # Check if Gurobi actually found at least one solution before timing out
             if m.SolCount > 0:
                 estimated_anomaly = [i for i in vertex_inds if x[i].X > 0.5]
                 if output:
@@ -140,7 +149,7 @@ def seedmix_edgedense(A, rho, resps, seed_nodes=None, alpha=0.05, edge_dense_qua
                      print("Time limit reached, but no feasible solution was found.")
                 return []
         else:
-            print(f"Optimization ended with status {m.Status} ({GRB.StatusConst(m.Status)}). No optimal or feasible solution found.")
+            print(f"Optimization ended with status {m.Status}. No optimal or feasible solution found.")
             return []
     except GurobiError as e:
         print(f"Gurobi Error during optimization: {e}")
@@ -215,6 +224,12 @@ def seedmix_cut(A, rho, resps, seed_nodes=None, alpha=0.05, output=True, time_li
             m.addConstr(x[seed_node_idx] == 1, name=f"force_seed_{seed_node_idx}")
 
 
+
+    # Warm start: initialize with seed nodes selected, everything else 0
+    # Gives Gurobi a feasible starting solution so it improves rather than searches from scratch
+    for i in vertex_inds:
+        x[i].Start = 1.0 if i in valid_seed_nodes else 0.0
+
     # create objective: Maximize the sum of responses for selected nodes
     # Ensure resps is a dictionary or can be accessed by index
     if isinstance(resps, np.ndarray) or isinstance(resps, list):
@@ -245,11 +260,13 @@ def seedmix_cut(A, rho, resps, seed_nodes=None, alpha=0.05, output=True, time_li
 
     # Optimize model
     try:
+        _t0 = time.time()
         m.optimize()
-        # Check optimization status
-        # OLD One: if m.Status == GRB.OPTIMAL or m.Status == GRB.FEASIBLE:
+        _elapsed = time.time() - _t0
+        _status_str = "OPTIMAL" if m.Status == GRB.OPTIMAL else "TIME_LIMIT" if m.Status == GRB.TIME_LIMIT else f"STATUS_{m.Status}"
+        _mipgap = f"{m.MIPGap*100:.2f}%" if m.SolCount > 0 else "N/A"
+        print(f"  [Gurobi cut] time={_elapsed:.1f}s | status={_status_str} | gap={_mipgap} | solutions={m.SolCount}", flush=True)
         if m.Status == GRB.OPTIMAL or m.Status == GRB.TIME_LIMIT:
-            # Check if Gurobi actually found at least one solution before timing out
             if m.SolCount > 0:
                 estimated_anomaly = [i for i in vertex_inds if x[i].X > 0.5]
                 if output:
@@ -260,7 +277,7 @@ def seedmix_cut(A, rho, resps, seed_nodes=None, alpha=0.05, output=True, time_li
                      print("Time limit reached, but no feasible solution was found.")
                 return []
         else:
-            print(f"Optimization ended with status {m.Status} ({GRB.StatusConst(m.Status)}). No optimal or feasible solution found.")
+            print(f"Optimization ended with status {m.Status}. No optimal or feasible solution found.")
             return []
     except GurobiError as e:
         print(f"Gurobi Error during optimization: {e}")
