@@ -17,7 +17,7 @@ from src.common import (
 )
 
 # Import netmix functions from your netmix2.py file
-from src.netmix2 import netmix_edgedense, netmix_cut # Assuming both are in netmix2.py
+from seedmix3 import seedmix_edgedense as netmix_edgedense, seedmix_cut as netmix_cut
 
 
 # Parse arguments
@@ -220,31 +220,8 @@ def run(args):
 
 
     ###########################################################
-    # 9. Parameters for netmix
-    # Alpha determines the maximum size of the subnetwork relative to the processed network size.
-    # The netmix function will ensure the size is at least the number of seed nodes.
-    alpha = args.density # Assuming 'density' argument is used for alpha here, as in your original code snippet
-                         # If 'density' was intended for rho, you might need a separate alpha argument.
-                         # Let's assume args.density is the alpha value for clique size.
-                         # The rho parameter for the density constraint is handled below.
-
-    # Calculate rho for the density constraint. This should be the target density value.
-    target_edge_density_value = 0.05 # Assuming a default target density if not specified elsewhere
-                                     # If args.density was meant for target density, use that here.
-                                     # Let's use a separate variable for clarity.
-    # Based on your original code `rho=target_edge_density*(s-1)`, where `s` was nonnull_count,
-    # it seems `rho` was *not* the target density itself, but a value derived from it
-    # and the *expected* size. This is confusing.
-    # The Gurobi constraint `LHS >= rho * 0.5*( vecsum*vecsum - vecsum )` implies `rho` *is* the target density.
-    # Let's assume `args.density` *is* the target density you want to enforce in the constraint.
-    target_edge_density_value = args.density # Use the value from the --density argument
-
-    rho_for_netmix = target_edge_density_value # Pass the target density value directly
-
-    if verbosity > 0:
-        print(f'Alpha parameter for clique size: {alpha}')
-        print(f'Target edge density constraint value (rho for NetMix): {rho_for_netmix}')
-
+    # 9. Set rho for the density constraint.
+    rho_for_netmix = args.density
 
     ###########################################################
     # 10. Map seed gene names to indices in the *processed* network
@@ -271,6 +248,15 @@ def run(args):
             print("No seed genes file provided. Running NetMix without forced seeds.")
         seed_node_indices = [] # Ensure it's an empty list if no seeds
 
+    # Dynamic alpha: target subnetwork = 2x seeds, as fraction of processed network
+    _num_seeds = len(seed_node_indices) if seed_node_indices else 1
+    _target_size = max(_num_seeds * 2, 15)
+    alpha = min(_target_size / max(len(node_list), 1), 0.95)
+
+    if verbosity > 0:
+        print(f'Alpha (max subnetwork fraction): {alpha:.4f}  ->  clique size cap: {int(len(node_list)*alpha)}')
+        print(f'Rho (edge density constraint): {rho_for_netmix}')
+
     # Check if the number of seed nodes exceeds the alpha-based initial clique size
     initial_clique_size_alpha = int(len(node_list) * alpha)
     if len(seed_node_indices) > initial_clique_size_alpha:
@@ -296,6 +282,7 @@ def run(args):
         sim_mat_delta, # Use G_delta as the network for optimization
         rho_for_netmix, # Pass the target density value
         resps,
+        seed_nodes=seed_node_indices, # Force seed genes into the subnetwork
         alpha=alpha, # Pass alpha (used for initial clique size calculation)
         edge_dense_quad=args.edge_dense_quad,      # <-- Uses the command line
         edge_dense_linear=args.edge_dense_linear,  # <-- Uses the command line       
