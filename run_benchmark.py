@@ -28,7 +28,7 @@ import numpy as np
 import concurrent.futures
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 
-from pipeline.wrappers import run_sgsa, run_sgsa_multirun, run_random_baseline, run_diamond, run_gnn_subnet, run_seedmix
+from pipeline.wrappers import run_sgsa, run_sgsa_multirun, run_random_baseline, run_diamond, run_gnn_subnet, run_seedmix, run_netmix2
 
 
 def load_data_OMNI_STRING():
@@ -152,11 +152,11 @@ def evaluate_single_disease(args):
     # 2. Run each algorithm
     for algo_name, algo_func in algorithms.items():
         try:
-            if algo_name == "SeedMix":
-                # SeedMix uses hidden_seeds only for realistic p-value simulation (not as labels)
+            if algo_name in ("SeedMix", "NetMix2"):
+                # Both use hidden_seeds for realistic p-value simulation (not as labels)
                 scores_dict = algo_func(network, known_seeds, hidden_seeds=hidden_seeds, disease_name=disease_name)
             else:
-                # All other methods — including GNN-SubNet — see only known seeds (no leakage)
+                # All other methods see only known seeds (no leakage)
                 scores_dict = algo_func(network, known_seeds)
                 
                 
@@ -204,7 +204,8 @@ def main():
         "DIAMOnD": run_diamond,
         "SGSA (Yours)": run_sgsa_multirun,  # multi-run averaged for variance stability
         "GNN-SubNet": run_gnn_subnet,
-        "SeedMix": run_seedmix
+        "SeedMix": run_seedmix,
+        "NetMix2": run_netmix2,
     }
 
     print(f"\nStarting parallel benchmark for {len(diseases)} diseases using {len(algorithms)} algorithms...")

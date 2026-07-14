@@ -1,5 +1,4 @@
 import sys
-sys.path.insert(0, "/home/rxg796/netmix2")
 import argparse
 import csv
 import pandas as pd
@@ -53,6 +52,11 @@ def get_parser():
     # parser.add_argument('--gurobi_method', required=False, type=int, help='Gurobi Method parameter.')
     parser.add_argument('--thread_count', required=False, type=int, help='Gurobi Threads parameter.')
     parser.add_argument("--mipgap", required=False, type=float, default=0.05, help="Gurobi MIPGap parameter.")
+    parser.add_argument('--ppr_cache', required=False, type=str,
+                        help='Optional path to a .npz cache file for the PPR kernel. If present and the '
+                             'processed node list matches, the cached PPR matrix is reused instead of '
+                             'recomputing it (saves the dominant O(n^3) cost when running many diseases '
+                             'over the same network). If absent, it is computed and saved here.')
 
 
     return parser
@@ -138,7 +142,7 @@ def run(args):
     try:
         # Check if there are enough data points for locfdr
         if len(zscores) >= 10: # locfdr typically needs at least 10 points
-            r_locfdr=locfdr(zscores, nulltype=1, plot=0)
+            # r_locfdr=locfdr(zscores, nulltype=1, plot=0)  # locfdr not available
             # correct the nans in the locfdr (if you plan to use its output)
             # nonnull_count = correct_nans_from_locfdr(r_locfdr, zscores, "mlest", verbosity)
             # If you need the nonnull_count for alpha calculation based on locfdr, uncomment above
@@ -157,7 +161,45 @@ def run(args):
 
     ##################################################
     # 7. Compute PPR matrix (used for G_delta)
-    PPR_sim_mat, PPR_mat_rowsums = compute_ppr_kernel(A_network, verbosity)
+    # This is the dominant cost (dense O(n^3) inversion). Since the underlying PPI
+    # network is identical across diseases, we cache it keyed on the exact processed
+    # node list (post p-value-filter + LCC), so subsequent diseases reuse it instead
+    # of recomputing from scratch.
+    PPR_sim_mat = None
+    PPR_mat_rowsums = None
+    cache_hit = False
+
+    if args.ppr_cache and not args.ppr_cache.endswith('.npz'):
+        args.ppr_cache = args.ppr_cache + '.npz'
+
+    if args.ppr_cache and os.path.isfile(args.ppr_cache):
+        try:
+            cached = np.load(args.ppr_cache, allow_pickle=True)
+            cached_nodes = list(cached['node_list'])
+            if cached_nodes == list(node_list):
+                PPR_sim_mat = cached['sim_mat']
+                PPR_mat_rowsums = cached['rowsums']
+                cache_hit = True
+                if verbosity > 0:
+                    print(f"Loaded PPR kernel from cache: {args.ppr_cache}")
+            else:
+                if verbosity > 0:
+                    print("PPR cache node list does not match current processed network; recomputing.")
+        except Exception as e:
+            print(f"Warning: Could not load PPR cache ({e}); recomputing.")
+
+    if not cache_hit:
+        PPR_sim_mat, PPR_mat_rowsums = compute_ppr_kernel(A_network, verbosity)
+        if args.ppr_cache and PPR_sim_mat is not None and len(PPR_sim_mat) > 0:
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(args.ppr_cache)) or '.', exist_ok=True)
+                np.savez(args.ppr_cache, sim_mat=PPR_sim_mat, rowsums=PPR_mat_rowsums,
+                         node_list=np.array(node_list, dtype=object))
+                if verbosity > 0:
+                    print(f"Saved PPR kernel cache to: {args.ppr_cache}")
+            except Exception as e:
+                print(f"Warning: Could not write PPR cache ({e}).")
+
     if PPR_sim_mat is None or len(PPR_sim_mat) == 0:
         print("Exiting due to error computing PPR kernel or empty result.")
         # Optionally write empty output files
@@ -275,22 +317,19 @@ def run(args):
         gurobi_output = False
 
     # Pass the seed_nodes list to the netmix function
-    # Assuming edge_dense_quad is the default based on your original code structure
-    # If you need to control quad/linear via args, uncomment related parser args
-    # and pass them here.
     est_subnetwork_indices = netmix_edgedense(
-        sim_mat_delta, # Use G_delta as the network for optimization
-        rho_for_netmix, # Pass the target density value
+        sim_mat_delta,           # Use G_delta as the network for optimization
+        rho_for_netmix,          # Pass the target density value
         resps,
-        seed_nodes=seed_node_indices, # Force seed genes into the subnetwork
-        alpha=alpha, # Pass alpha (used for initial clique size calculation)
+        seed_nodes=seed_node_indices,              # Force seed genes into the subnetwork
+        alpha=alpha,                               # Pass alpha (used for initial clique size calculation)
         edge_dense_quad=args.edge_dense_quad,      # <-- Uses the command line
-        edge_dense_linear=args.edge_dense_linear,  # <-- Uses the command line       
+        edge_dense_linear=args.edge_dense_linear,  # <-- Uses the command line
         output=gurobi_output,
-        time_limit=3600*args.time_limit, # Convert hours to seconds
-        method=None, # Pass Gurobi method if added to args
-        thread_count=args.thread_count, # Wired from CLI
-        mipgap=args.mipgap # Wired from CLI, default 0.05
+        time_limit=3600*args.time_limit,           # Convert hours to seconds
+        method=None,                               # Pass Gurobi method if added to args
+        thread_count=args.thread_count,            # Wired from CLI
+        mipgap=args.mipgap                         # Wired from CLI, default 0.05
     )
 
     if est_subnetwork_indices is None: # Handle potential None return from netmix

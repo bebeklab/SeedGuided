@@ -1,0 +1,4 @@
+Disease,Solver,SeedMix_RefGenes,SubnetworkSize,NumSeeds,NumReferenceGenes,ReferenceSource
+Rheumatoid Arthritis,Gurobi (exact),4,60,30,58,Harmonizome DISEASES
+Type 2 Diabetes,Gurobi (exact),3,16,8,69,Harmonizome DISEASES
+Bipolar Disorder,Gurobi (exact),10,102,54,424,GWAS Catalog

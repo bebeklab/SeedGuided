@@ -256,7 +256,7 @@ def restrict_to_genes_in_network(pvals_list, node_list, A_network, verbosity=0):
 
     # find nodes in the network that has scores (pvals > 0)
     # Using a small epsilon because floating point zeros might not be exactly 0
-    nodes_with_pval_in_network_indices = np.where(pvals_list > 1e-12)[0] # Use np.where for efficiency
+    nodes_with_pval_in_network_indices = np.where(pvals_list > 0)[0] # Use np.where for efficiency
 
     if len(nodes_with_pval_in_network_indices) == 0:
         if verbosity > 0:

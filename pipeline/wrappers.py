@@ -184,6 +184,118 @@ def run_seedmix(network, known_seeds, hidden_seeds=None, density=0.1, disease_na
 
 
 
+def run_netmix2(network, known_seeds, hidden_seeds=None, density=0.05, disease_name="temp"):
+    """
+    Runs NetMix2 as a benchmark method.
+    Uses the same p-value simulation as SeedMix for fair comparison.
+    """
+    if hidden_seeds is None:
+        hidden_seeds = set()
+
+    safe_name = disease_name.replace(" ", "_").replace("/", "_")
+    base_dir = os.path.abspath(os.getcwd())
+    unique_dir = os.path.join(base_dir, f"temp_netmix2_sandbox_{safe_name}")
+    os.makedirs(unique_dir, exist_ok=True)
+
+    temp_edge_list = os.path.join(unique_dir, "network.txt")
+    temp_gene_scores = os.path.join(unique_dir, "scores.tsv")
+    out_dir = os.path.join(unique_dir, "output")
+    os.makedirs(out_dir, exist_ok=True)
+
+    try:
+        # 1. Write network
+        with open(temp_edge_list, 'w') as f:
+            for u, v in network.edges():
+                f.write(f"{u}\t{v}\n")
+
+        # 2. Write p-values using same BUM simulation as SeedMix
+        with open(temp_gene_scores, 'w') as f:
+            for node in network.nodes():
+                if node in known_seeds:
+                    pval = np.random.beta(0.3, 5.0)
+                    pval = max(pval, 1e-16)
+                elif node in hidden_seeds:
+                    pval = np.random.beta(0.3, 4.0)
+                    pval = max(pval, 1e-16)
+                else:
+                    pval = random.uniform(0.05, 1.0)
+                f.write(f"{node}\t{pval}\n")
+
+        # 3. Run NetMix2 via command line
+        n_nodes = len(list(network.nodes()))
+        max_ppr_edges = min(10000, n_nodes * (n_nodes - 1) // 2 - 1)
+
+        netmix2_dir = "/home/rxg796/netmix2"
+        cmd = [
+            "python3.11", "run_netmix2.py",
+            "--edge_list", temp_edge_list,
+            "--gene_score", temp_gene_scores,
+            "--density", str(density),
+            "--num_edges", str(max_ppr_edges),
+            "--time_limit", "1",
+            "--verbose", "0",
+            "--output", out_dir,
+        ]
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = netmix2_dir + ":" + env.get("PYTHONPATH", "")
+
+        result = subprocess.run(
+            cmd, cwd=netmix2_dir, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=3600, env=env
+        )
+
+        # 4. Load p-values for ranking
+        pval_lookup = {}
+        with open(temp_gene_scores, 'r') as pf:
+            for line in pf:
+                parts = line.strip().split('\t')
+                if len(parts) == 2:
+                    try:
+                        pval_lookup[parts[0]] = float(parts[1])
+                    except ValueError:
+                        pass
+
+        # 5. Read output subnetwork and score
+        scores_dict = {node: random.uniform(0, 1e-5) for node in network.nodes()}
+        out_file = os.path.join(out_dir, 'netmix_subnetwork.tsv')
+
+        if os.path.exists(out_file):
+            with open(out_file, 'r') as f:
+                netmix2_genes = [line.strip() for line in f if line.strip()]
+
+            print(f"      -> NetMix2 returned {len(netmix2_genes)} genes for {disease_name}")
+
+            netmix2_set = set(netmix2_genes)
+            ppr_scores = nx.pagerank(
+                network,
+                alpha=0.85,
+                personalization={g: 1.0 for g in netmix2_set if g in network},
+                max_iter=200,
+                tol=1e-6
+            )
+            for node in network.nodes():
+                base = ppr_scores.get(node, 0.0)
+                if node in netmix2_set:
+                    bonus = 1.0 - pval_lookup.get(node, 0.5)
+                    scores_dict[node] = base + 0.5 * bonus + random.uniform(0, 1e-5)
+                else:
+                    scores_dict[node] = base + random.uniform(0, 1e-7)
+
+        return scores_dict
+
+    except Exception as e:
+        print(f"  [!] NetMix2 failed. Error: {e}")
+        if hasattr(e, 'stderr') and e.stderr:
+            print(f"  [!] NetMix2 stderr: {e.stderr.decode()}")
+        return {node: random.uniform(0, 1e-5) for node in network.nodes()}
+
+    finally:
+        if os.path.exists(unique_dir):
+            shutil.rmtree(unique_dir)
+
+
 def seed_guided_simulated_annealing(G, seed_set, scores,
                                     size_penalty=0.1,
                                     T_start=1.0,

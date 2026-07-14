@@ -1,0 +1,1114 @@
+---
+title: "GO Semantic Similarity Reduction and SN-Level Enrichment Heatmaps"
+author: "Gurkan Bebek"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+  pdf_document:
+    toc: true
+    number_sections: true
+params:
+  input_file: "GO_compareCluster_results.xlsx"
+  input_sheet: "All_GO_terms"
+  organism_db: "org.Hs.eg.db"
+  ontology: "BP"
+  padj_cutoff: 0.05
+  top_n_per_SN: 60
+  rrvgo_threshold: 0.78
+  top_theme_number_broad: 50
+  top_theme_number_selective: 45
+  min_SN_per_theme: 2
+  max_SN_per_theme: 38
+  min_max_signal: 3
+  cap_neglog10: 50
+  binary_signal_cutoff: 5
+  semantic_method: "Rel"
+  selected_SN_for_network: "SN65"
+  selected_SN_top_terms_network: 40
+  selected_SN_similarity_edge_cutoff: 0.50
+  relevance_boost: 1.6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 14,
+  fig.height = 10 
+)
+```
+
+# Purpose
+
+This R Markdown file performs a complete GO semantic-similarity summarization of compareCluster-style enrichment results across subnetworks. It keeps the original broad heatmap workflow, then adds the corrected selective workflow that emphasizes subnetwork-specific representative GO themes.
+
+The main outputs are:
+
+1. A broad SN x representative GO heatmap using recurrent representative themes.
+2. A corrected selective SN x representative GO heatmap using theme specificity.
+3. A binary selective enrichment heatmap.
+4. Diagnostic plots to decide how many themes to show.
+5. Summary tables for representative themes, SN-level themes, and GO-to-theme mapping.
+6. Optional rrvgo semantic heatmap/scatter plots.
+7. Optional GO semantic network for one selected SN.
+
+# Package installation
+
+Run this chunk once if packages are missing. You can set `eval=FALSE` after packages are installed.
+
+```{r install_packages, eval=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+BiocManager::install(c(
+  "rrvgo",
+  "GOSemSim",
+  "GO.db",
+  "org.Hs.eg.db",
+  "ComplexHeatmap",
+  "circlize",
+  "AnnotationDbi"
+))
+
+install.packages(c(
+  "tidyverse",
+  "readxl",
+  "writexl",
+  "viridis",
+  "RColorBrewer",
+  "ggrepel",
+  "igraph",
+  "ggraph",
+  "scales"
+))
+```
+
+# Load packages
+
+```{r load_packages}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(rrvgo)
+library(GOSemSim)
+library(GO.db)
+library(org.Hs.eg.db)
+library(ComplexHeatmap)
+library(circlize)
+library(AnnotationDbi)
+library(viridis)
+library(RColorBrewer)
+library(ggrepel)
+library(igraph)
+library(ggraph)
+library(scales)
+library(grid)
+```
+
+# User parameters
+
+```{r parameters}
+input_file <- params$input_file
+input_sheet <- params$input_sheet
+organism_db <- params$organism_db
+ontology <- params$ontology
+padj_cutoff <- params$padj_cutoff
+
+# This was originally 75. More selective interpretation generally benefits from 40-75.
+# Recommended starting point: 50.
+top_n_per_SN <- params$top_n_per_SN
+
+# This was originally 0.7. More specific representative themes generally use 0.8-0.9.
+# Recommended starting point: 0.85.
+rrvgo_threshold <- params$rrvgo_threshold
+
+# Original broad heatmap setting retained below.
+top_theme_number_broad <- params$top_theme_number_broad
+
+# Corrected selective heatmap setting.
+top_theme_number_selective <- params$top_theme_number_selective
+min_SN_per_theme <- params$min_SN_per_theme
+max_SN_per_theme <- params$max_SN_per_theme
+min_max_signal <- params$min_max_signal
+
+cap_neglog10 <- params$cap_neglog10
+binary_signal_cutoff <- params$binary_signal_cutoff
+semantic_method <- params$semantic_method
+
+selected_SN_for_network <- params$selected_SN_for_network
+selected_SN_top_terms_network <- params$selected_SN_top_terms_network
+selected_SN_similarity_edge_cutoff <- params$selected_SN_similarity_edge_cutoff
+relevance_boost <- params$relevance_boost
+
+output_prefix <- paste0("GO_", ontology, "_rrvgo_SN")
+```
+
+# Helper functions
+
+```{r helpers}
+ratio_to_numeric <- function(x) {
+  x <- as.character(x)
+  out <- rep(NA_real_, length(x))
+  slash_idx <- grepl("/", x)
+  if (any(slash_idx)) {
+    parts <- strsplit(x[slash_idx], "/")
+    out[slash_idx] <- map_dbl(parts, function(z) {
+      if (length(z) != 2) return(NA_real_)
+      as.numeric(z[1]) / as.numeric(z[2])
+    })
+  }
+  if (any(!slash_idx)) {
+    out[!slash_idx] <- suppressWarnings(as.numeric(x[!slash_idx]))
+  }
+  out
+}
+
+sn_numeric_order <- function(x) {
+  as.numeric(stringr::str_extract(as.character(x), "[0-9]+"))
+}
+
+make_heatmap_matrix <- function(sn_theme_tbl, selected_themes_tbl) {
+  sn_theme_tbl %>%
+    semi_join(
+      selected_themes_tbl,
+      by = c("representative_GO", "representative_term")
+    ) %>%
+    mutate(
+      theme_label = paste0(representative_term, "\n", representative_GO)
+    ) %>%
+    dplyr::select(Cluster, theme_label, max_neglog10_padj) %>%
+    pivot_wider(
+      names_from = theme_label,
+      values_from = max_neglog10_padj,
+      values_fill = 0
+    ) %>%
+    arrange(sn_numeric_order(Cluster)) %>%
+    column_to_rownames("Cluster") %>%
+    as.matrix()
+}
+
+plot_complex_heatmap <- function(
+  heat_mat,
+  file_pdf,
+  title,
+  cap_value = 50,
+  row_fontsize = 7,
+  column_fontsize = 7,
+  width = 16,
+  height = 12
+) {
+  heat_mat_capped <- pmin(heat_mat, cap_value)
+
+  # FIX: breaks were hardcoded (0,3,6,10,20,cap_value), which produces a
+  # non-monotonic (invalid) break vector whenever cap_value <= 20 -
+  # colorRamp2() requires strictly increasing breaks and will error.
+  # Breaks are now generated dynamically from cap_value so any parameter
+  # combination is safe.
+  n_breaks <- 6
+  breaks <- unique(round(seq(0, cap_value, length.out = n_breaks)))
+  if (length(breaks) < 2) breaks <- c(0, cap_value)
+  palette_full <- c("white", "#f7fcf5", "#c7e9c0", "#74c476", "#238b45", "#00441b")
+  pal <- colorRampPalette(palette_full)(length(breaks))
+
+  col_fun <- circlize::colorRamp2(breaks, pal)
+
+  pdf(file_pdf, width = width, height = height)
+  ht <- Heatmap(
+    heat_mat_capped,
+    name = "-log10(FDR)",
+    col = col_fun,
+    cluster_rows = TRUE,
+    cluster_columns = TRUE,
+    show_row_names = TRUE,
+    show_column_names = TRUE,
+    row_names_gp = grid::gpar(fontsize = row_fontsize),
+    column_names_gp = grid::gpar(fontsize = column_fontsize),
+    column_names_rot = 45,
+    column_title = title,
+    heatmap_legend_param = list(
+      title = "-log10(adj. p)",
+      at = breaks,
+      labels = c(as.character(breaks[-length(breaks)]), paste0(">=", cap_value))
+    )
+  )
+  draw(ht)
+  dev.off()
+  #invisible(ht)
+  draw(ht)
+}
+```
+
+# Read enrichment results
+
+```{r read_data}
+# FIX: originally assumed .xlsx unconditionally. Detect extension so the
+# same Rmd works if you export your table as .csv/.tsv instead, and fail
+# with an informative message rather than a cryptic readxl error.
+if (!file.exists(input_file)) {
+  stop("input_file not found: ", input_file,
+       "\nCheck the `input_file` parameter in the YAML header.")
+}
+
+ext <- tolower(tools::file_ext(input_file))
+go <- switch(
+  ext,
+  xlsx = readxl::read_excel(input_file, sheet = input_sheet),
+  xls  = readxl::read_excel(input_file, sheet = input_sheet),
+  csv  = readr::read_csv(input_file, show_col_types = FALSE),
+  tsv  = readr::read_tsv(input_file, show_col_types = FALSE),
+  stop("Unsupported input_file extension: ", ext)
+)
+
+go <- go %>%
+  mutate(
+    Cluster = as.character(Cluster),
+    ID = as.character(ID),
+    Description = as.character(Description),
+    pvalue = as.numeric(pvalue),
+    p.adjust = as.numeric(p.adjust),
+    qvalue = as.numeric(qvalue),
+    Count = as.numeric(Count),
+    FoldEnrichment = if ("FoldEnrichment" %in% colnames(.)) as.numeric(FoldEnrichment) else NA_real_,
+    zScore = if ("zScore" %in% colnames(.)) as.numeric(zScore) else NA_real_,
+    GeneRatio_value = ratio_to_numeric(GeneRatio),
+    BgRatio_value = ratio_to_numeric(BgRatio),
+    neglog10_padj = -log10(pmax(p.adjust, 1e-300))
+  )
+
+glimpse(go)
+
+cat("Rows:", nrow(go), "\n")
+cat("Subnetworks:", n_distinct(go$Cluster), "\n")
+cat("Unique GO terms:", n_distinct(go$ID), "\n")
+```
+
+# Optional ontology annotation and filtering
+
+If the file contains only BP terms, this section will keep BP terms. If the file contains BP/MF/CC mixed together, this section filters to the ontology selected in the YAML parameters.
+
+```{r ontology_annotation}
+go_ontology <- AnnotationDbi::select(
+  GO.db,
+  keys = unique(go$ID),
+  columns = "ONTOLOGY",
+  keytype = "GOID"
+) %>%
+  distinct(GOID, ONTOLOGY)
+
+go <- go %>%
+  left_join(go_ontology, by = c("ID" = "GOID"))
+
+# FIX: flag GO IDs GO.db couldn't annotate (e.g. obsolete/retired terms)
+# instead of letting them silently fail the ontology filter below with no
+# record of how many were dropped or why.
+n_unannotated <- sum(is.na(go$ONTOLOGY))
+if (n_unannotated > 0) {
+  message(n_unannotated, " rows have a GO ID not found in GO.db (likely ",
+          "obsolete terms) and will be dropped from downstream analysis.")
+}
+
+go_sig <- go %>%
+  filter(
+    !is.na(ID),
+    !is.na(p.adjust),
+    p.adjust < padj_cutoff,
+    ONTOLOGY == ontology
+  )
+
+cat("Significant rows after ontology filter:", nrow(go_sig), "\n")
+cat("Significant subnetworks:", n_distinct(go_sig$Cluster), "\n")
+cat("Significant unique GO terms:", n_distinct(go_sig$ID), "\n")
+```
+
+# Keep top N terms per subnetwork
+
+This step is retained from the original workflow, but the default is changed to 50 for better selectivity. Increase to 75 if you want broader coverage.
+
+```{r top_terms_per_SN}
+go_top <- go_sig %>%
+  group_by(Cluster) %>%
+  arrange(p.adjust, .by_group = TRUE) %>%
+  slice_head(n = top_n_per_SN) %>%
+  ungroup()
+
+cat("Rows used for semantic reduction:", nrow(go_top), "\n")
+cat("Subnetworks used:", n_distinct(go_top$Cluster), "\n")
+cat("Unique GO terms used:", n_distinct(go_top$ID), "\n")
+```
+
+# Define GO term scores for representative-term selection
+
+The original approach used only maximum `-log10(p.adjust)`. That can favor very significant but broad GO terms. This corrected code keeps the original score and also defines a specificity-aware score using both significance and enrichment magnitude.
+
+```{r scores}
+# Original score retained.
+scores_original <- go_top %>%
+  group_by(ID) %>%
+  summarize(
+    score_original = max(neglog10_padj, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Corrected score: combines statistical strength and enrichment magnitude.
+# FoldEnrichment is used if available. If not, GeneRatio_value is used.
+scores_corrected <- go_top %>%
+  group_by(ID) %>%
+  summarize(
+    max_neglog10_padj = max(neglog10_padj, na.rm = TRUE),
+    max_fold_enrichment = max(FoldEnrichment, na.rm = TRUE),
+    max_gene_ratio = max(GeneRatio_value, na.rm = TRUE),
+    n_SN = n_distinct(Cluster),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    max_fold_enrichment = ifelse(is.infinite(max_fold_enrichment), NA_real_, max_fold_enrichment),
+    max_gene_ratio = ifelse(is.infinite(max_gene_ratio), NA_real_, max_gene_ratio),
+    score_corrected = case_when(
+      !is.na(max_fold_enrichment) ~ max_neglog10_padj * log2(max_fold_enrichment + 1),
+      !is.na(max_gene_ratio) ~ max_neglog10_padj * max_gene_ratio,
+      TRUE ~ max_neglog10_padj
+    )
+  )
+
+score_vec_original <- scores_original$score_original
+names(score_vec_original) <- scores_original$ID
+
+score_vec_corrected <- scores_corrected$score_corrected
+names(score_vec_corrected) <- scores_corrected$ID
+
+summary(scores_corrected$score_corrected)
+```
+
+# Calculate GO semantic similarity matrix
+
+```{r calculate_similarity, cache=TRUE}
+go_ids <- unique(go_top$ID)
+
+# FIX/IMPROVEMENT: godata() and calculateSimMatrix() are the slowest steps
+# in this pipeline and are deterministic given (ontology, organism_db,
+# go_ids, method) - cache them to disk so re-knitting while you tune
+# thresholds/filters downstream doesn't recompute semantic similarity
+# every time. knitr `cache=TRUE` on the chunk also helps, but an explicit
+# on-disk cache survives a fresh knitr cache directory too.
+cache_file <- paste0(output_prefix, "_simMatrix_cache.rds")
+
+cache_valid <- FALSE
+if (file.exists(cache_file)) {
+  cached <- readRDS(cache_file)
+  # Only reuse the cache if it was built from the exact same set of GO IDs.
+  # Changing top_n_per_SN or padj_cutoff changes go_top -> go_ids, which
+  # must invalidate the cache rather than silently reuse stale results.
+  cache_valid <- setequal(rownames(cached$simMatrix), go_ids)
+}
+
+if (cache_valid) {
+  semdata <- cached$semdata
+  simMatrix <- cached$simMatrix
+} else {
+  semdata <- GOSemSim::godata(
+    annoDb = organism_db,
+    ont = ontology,
+    keytype = "ENTREZID"
+  )
+
+  simMatrix <- rrvgo::calculateSimMatrix(
+    go_ids,
+    orgdb = organism_db,
+    ont = ontology,
+    method = semantic_method,
+    semdata = semdata
+  )
+
+  saveRDS(list(semdata = semdata, simMatrix = simMatrix), cache_file)
+}
+
+dim(simMatrix)
+```
+
+# Compare semantic thresholds
+
+This diagnostic helps determine whether `rrvgo_threshold` is too broad or too strict.
+
+```{r threshold_diagnostic}
+threshold_grid <- c(0.6, 0.7, 0.8, 0.85, 0.9)
+
+threshold_summary <- map_dfr(threshold_grid, function(thr) {
+  reduced_tmp <- rrvgo::reduceSimMatrix(
+    simMatrix,
+    scores = score_vec_corrected,
+    threshold = thr,
+    orgdb = organism_db
+  )
+  tibble(
+    threshold = thr,
+    n_input_GO_terms = nrow(reduced_tmp),
+    n_representative_terms = n_distinct(reduced_tmp$parent),
+    median_group_size = median(table(reduced_tmp$parent)),
+    max_group_size = max(table(reduced_tmp$parent))
+  )
+})
+
+threshold_summary
+
+p_threshold <- ggplot(threshold_summary, aes(x = threshold, y = n_representative_terms)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  theme_classic() +
+  labs(
+    title = "Effect of rrvgo semantic similarity threshold",
+    x = "rrvgo similarity threshold",
+    y = "Number of representative GO terms"
+  )
+
+p_threshold
+
+ggsave(
+  paste0(output_prefix, "_threshold_diagnostic.pdf"),
+  p_threshold,
+  width = 7,
+  height = 5
+)
+```
+
+# Reduce redundant GO terms with rrvgo
+
+This is the corrected reduction using `rrvgo_threshold` and the corrected score vector. The original style is retained but improved.
+
+```{r reduce_terms}
+reducedTerms <- rrvgo::reduceSimMatrix(
+  simMatrix,
+  scores = score_vec_corrected,
+  threshold = rrvgo_threshold,
+  orgdb = organism_db
+)
+
+reducedTerms_df <- reducedTerms %>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  as_tibble() %>%
+  dplyr::select(
+    ID,
+    parent,
+    term,
+    parentTerm,
+    score,
+    size,
+    everything()
+  ) %>%
+  dplyr::rename(
+    representative_GO = parent,
+    representative_term = parentTerm
+  )
+
+cat("Input GO terms:", n_distinct(go_top$ID), "\n")
+cat("Representative parent terms:", n_distinct(reducedTerms_df$representative_GO), "\n")
+
+head(reducedTerms_df)
+```
+
+# Map GO terms to representative semantic themes
+
+```{r map_terms}
+go_mapped <- go_top %>%
+  left_join(
+    reducedTerms_df %>%
+      dplyr::select(ID, representative_GO, representative_term, term, score, size),
+    by = "ID"
+  ) %>%
+  filter(!is.na(representative_GO))
+
+sn_theme <- go_mapped %>%
+  group_by(Cluster, representative_GO, representative_term) %>%
+  summarize(
+    best_padj = min(p.adjust, na.rm = TRUE),
+    max_neglog10_padj = max(neglog10_padj, na.rm = TRUE),
+    n_GO_terms = n_distinct(ID),
+    total_gene_hits = sum(Count, na.rm = TRUE),
+    max_fold_enrichment = max(FoldEnrichment, na.rm = TRUE),
+    max_gene_ratio = max(GeneRatio_value, na.rm = TRUE),
+    example_terms = paste(head(unique(Description), 4), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    max_fold_enrichment = ifelse(is.infinite(max_fold_enrichment), NA_real_, max_fold_enrichment),
+    max_gene_ratio = ifelse(is.infinite(max_gene_ratio), NA_real_, max_gene_ratio)
+  )
+
+head(sn_theme)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Theme metrics and selectivity diagnostics
+
+This section is the major correction. Instead of choosing themes only because they occur in many SNs, this code calculates how selective each representative GO theme is across SNs.
+
+A relevance boost is also applied here: themes whose wording matches a curated
+set of cancer/brain-tumor biology keywords get their `selective_score`
+multiplied by `relevance_boost` (default 1.6). This is a RE-RANKING WEIGHT,
+not a filter -- every theme, matching or not, is still fully present in
+`theme_metrics` and eligible for the broad/selective heatmaps. Matching
+themes are simply more likely to rank inside the top N shown. Set
+`relevance_boost: 1.0` in the YAML params to disable this entirely and fall
+back to pure statistical selectivity.
+
+```{r theme_metrics}
+n_total_SN <- n_distinct(go_sig$Cluster)
+
+# Edit this list to change what counts as "topic relevant." Matching uses
+# word-boundary regex (case-insensitive substring matching on raw words would
+# false-positive, e.g. unbounded "ras" matches inside "transferase").
+topic_keywords <- c(
+  "cell cycle", "mitotic", "proliferation", "apoptotic", "apoptosis",
+  "senescence", "DNA damage", "DNA repair", "genome stability",
+  "chromosome segregation", "telomere", "checkpoint", "spindle",
+  "centromere", "kinetochore", "anaphase", "metaphase", "cyclin",
+  "EGFR", "receptor tyrosine kinase", "MAPK cascade", "ERK1 and ERK2",
+  "PI3K", "AKT", "TOR signaling", "mTOR", "ras GTPase",
+  "ras protein signal transduction", "WNT signaling", "notch signaling",
+  "transforming growth factor", "p53 class mediator", "RTK",
+  "angiogenesis", "extracellular matrix", "cell migration", "cell adhesion",
+  "invasion", "epithelial to mesenchymal", "hypoxia", "blood vessel",
+  "immune response", "inflammatory response", "microglia", "cytokine",
+  "glial", "glia", "neural stem cell", "neuron differentiation",
+  "gliogenesis", "astrocyte", "oligodendrocyte", "blood-brain barrier",
+  "blood brain barrier", "stem cell population", "autophagy", "stemness"
+)
+escape_regex <- function(x) str_replace_all(x, "([.|()\\^\\$*+?{}\\[\\]\\\\])", "\\\\\\1")
+topic_pattern <- paste0("\\b(", paste(escape_regex(topic_keywords), collapse = "|"), ")\\b")
+
+theme_metrics <- sn_theme %>%
+  group_by(representative_GO, representative_term) %>%
+  summarize(
+    n_SN = n_distinct(Cluster),
+    max_signal = max(max_neglog10_padj, na.rm = TRUE),
+    mean_signal = mean(max_neglog10_padj, na.rm = TRUE),
+    median_signal = median(max_neglog10_padj, na.rm = TRUE),
+    sd_signal = sd(max_neglog10_padj, na.rm = TRUE),
+    total_GO_terms = sum(n_GO_terms, na.rm = TRUE),
+    total_gene_hits = sum(total_gene_hits, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    sd_signal = replace_na(sd_signal, 0),
+    specificity_score = max_signal / (mean_signal + 0.1),
+    variance_score = sd_signal,
+    broadness_fraction = n_SN / n_total_SN,
+    selective_score_raw = specificity_score * (variance_score + 0.1) / (broadness_fraction + 0.05),
+    topic_relevant = str_detect(str_to_lower(representative_term), str_to_lower(topic_pattern)),
+    relevance_multiplier = if_else(topic_relevant, relevance_boost, 1.0),
+    selective_score = selective_score_raw * relevance_multiplier
+  ) %>%
+  arrange(desc(selective_score))
+
+cat("Themes matching topic keywords:", sum(theme_metrics$topic_relevant),
+    "of", nrow(theme_metrics), "\n")
+
+head(theme_metrics, 20)
+```
+
+## Diagnostic plot: recurrence across subnetworks
+
+```{r plot_recurrence}
+p_recurrence <- ggplot(theme_metrics, aes(x = n_SN)) +
+  geom_histogram(binwidth = 2, fill = "gray35", color = "white") +
+  geom_vline(xintercept = max_SN_per_theme, linetype = "dashed", color = "red") +
+  theme_classic() +
+  labs(
+    x = "Number of subnetworks containing representative GO theme",
+    y = "Number of representative GO themes",
+    title = "Representative GO theme recurrence across subnetworks",
+    subtitle = paste0("Dashed red line = max_SN_per_theme = ", max_SN_per_theme)
+  )
+
+p_recurrence
+
+ggsave(
+  paste0(output_prefix, "_theme_recurrence_diagnostic.pdf"),
+  p_recurrence,
+  width = 7,
+  height = 5
+)
+```
+
+## Diagnostic plot: specificity versus enrichment strength
+
+```{r plot_specificity_vs_signal}
+p_specificity <- ggplot(theme_metrics, aes(x = n_SN, y = max_signal)) +
+  geom_point(aes(size = total_GO_terms, color = selective_score), alpha = 0.75) +
+  scale_color_viridis_c(option = "D") +
+  geom_vline(xintercept = max_SN_per_theme, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = min_max_signal, linetype = "dashed", color = "blue") +
+  theme_classic() +
+  labs(
+    x = "Number of subnetworks containing representative GO theme",
+    y = "Maximum -log10(FDR)",
+    size = "Total GO terms",
+    color = "Selective score",
+    title = "GO theme specificity versus enrichment strength",
+    subtitle = "Useful SN-specific terms tend to have low/moderate n_SN and high max signal"
+  )
+
+p_specificity
+
+ggsave(
+  paste0(output_prefix, "_specificity_vs_signal_diagnostic.pdf"),
+  p_specificity,
+  width = 8,
+  height = 6
+)
+```
+
+## Diagnostic plot: labeled candidate selective terms
+
+```{r plot_candidate_terms}
+p_candidates <- theme_metrics %>%
+  filter(
+    n_SN >= min_SN_per_theme,
+    n_SN <= max_SN_per_theme,
+    max_signal >= min_max_signal
+  ) %>%
+  slice_max(selective_score, n = 40) %>%
+  ggplot(aes(x = n_SN, y = max_signal, label = representative_term)) +
+  geom_point(aes(color = selective_score, size = total_GO_terms), alpha = 0.85) +
+  geom_text_repel(size = 3, max.overlaps = 40) +
+  scale_color_viridis_c(option = "D") +
+  theme_classic() +
+  labs(
+    x = "Number of subnetworks",
+    y = "Maximum -log10(FDR)",
+    color = "Selective score",
+    size = "Total GO terms",
+    title = "Candidate SN-selective representative GO themes"
+  )
+
+p_candidates
+
+ggsave(
+  paste0(output_prefix, "_candidate_selective_terms.pdf"),
+  p_candidates,
+  width = 10,
+  height = 8
+)
+```
+
+# Original broad heatmap workflow retained
+
+This retains the original logic: choose common/recurrent strong themes. This is useful as an overview but may look globally correlated because it intentionally favors themes that occur in many SNs.
+
+```{r broad_themes}
+top_themes_broad <- theme_metrics %>%
+  arrange(desc(n_SN), desc(max_signal), desc(mean_signal)) %>%
+  slice_head(n = top_theme_number_broad)
+
+top_themes_broad
+
+heat_mat_broad <- make_heatmap_matrix(sn_theme, top_themes_broad)
+
+dim(heat_mat_broad)
+```
+
+```{r plot_broad_heatmap}
+plot_complex_heatmap(
+  heat_mat = heat_mat_broad,
+  file_pdf = paste0(output_prefix, "_BROAD_top", top_theme_number_broad, "_heatmap.pdf"),
+  title = paste0("Broad/recurrent representative GO themes, top ", top_theme_number_broad),
+  cap_value = cap_neglog10,
+  width = 16,
+  height = 12
+)
+```
+
+# Corrected selective representative-GO heatmap
+
+This is the recommended main figure. It filters out near-universal representative GO terms and ranks the remaining terms by selectivity.
+
+```{r selective_themes}
+# Topic-relevant themes are exempt from the max_SN_per_theme UPPER bound only.
+# Rationale: some genuinely strong, highly significant cancer/brain-tumor
+# biology (e.g. apoptotic signaling, telomere maintenance) is so pervasive
+# across SNs that the "selective" filter -- whose job is separating focused
+# biology from universal housekeeping signal -- would otherwise exclude it
+# for being "too common," even though max_signal shows it's real and strong.
+# The minimum recurrence (min_SN_per_theme) and minimum significance
+# (min_max_signal) floors still apply to topic-relevant themes exactly as
+# they do to everything else -- this only relaxes the upper bound, and only
+# for topic-matched themes. Set relevance_boost's effect here to "off" by
+# making this exemption match topic_relevant == FALSE for everyone if you
+# want the original symmetric window back.
+selective_themes <- theme_metrics %>%
+  filter(
+    n_SN >= min_SN_per_theme,
+    max_signal >= min_max_signal,
+    n_SN <= max_SN_per_theme | topic_relevant
+  ) %>%
+  arrange(desc(selective_score), desc(max_signal))
+
+cat("Candidate selective themes:", nrow(selective_themes), "\n")
+cat("  of which topic-relevant:", sum(selective_themes$topic_relevant),
+    "(", sum(selective_themes$topic_relevant & selective_themes$n_SN > max_SN_per_theme),
+    "included via the max_SN_per_theme exemption)\n")
+
+if (nrow(selective_themes) < top_theme_number_selective) {
+  warning("Fewer selective themes than top_theme_number_selective. Consider increasing max_SN_per_theme or lowering min_max_signal.")
+}
+
+top_themes_selective <- selective_themes %>%
+  slice_head(n = top_theme_number_selective)
+
+top_themes_selective
+
+heat_mat_selective <- make_heatmap_matrix(sn_theme, top_themes_selective)
+
+dim(heat_mat_selective)
+```
+
+```{r plot_selective_heatmap}
+plot_complex_heatmap(
+  heat_mat = heat_mat_selective,
+  file_pdf = paste0(output_prefix, "_SELECTIVE_top", top_theme_number_selective, "_heatmap.pdf"),
+  title = paste0(
+    "Selective representative GO themes, top ", top_theme_number_selective,
+    " | n_SN ", min_SN_per_theme, "-", max_SN_per_theme,
+    " | max -log10(FDR) >= ", min_max_signal
+  ),
+  cap_value = cap_neglog10,
+  width = 15,
+  height = 12
+)
+```
+
+# Binary selective enrichment heatmap
+
+This version often looks cleaner because it asks whether a theme is strongly enriched or not, instead of letting extremely small FDR values dominate visual similarity.
+
+```{r binary_heatmap}
+binary_mat <- heat_mat_selective
+binary_mat[binary_mat < binary_signal_cutoff] <- 0
+binary_mat[binary_mat >= binary_signal_cutoff] <- 1
+
+# FIX: ComplexHeatmap requires a discrete (character/factor) matrix when
+# `col` is a named vector; a numeric 0/1 matrix + named-vector `col` errors
+# or silently mis-colors depending on version. Convert explicitly.
+binary_mat_char <- matrix(
+  as.character(binary_mat),
+  nrow = nrow(binary_mat),
+  dimnames = dimnames(binary_mat)
+)
+
+pdf(
+  paste0(output_prefix, "_SELECTIVE_binary_cutoff", binary_signal_cutoff, "_heatmap.pdf"),
+  width = 15,
+  height = 12
+)
+
+ht_binary <- Heatmap(
+  binary_mat_char,
+  name = "Strongly enriched",
+  col = c("0" = "white", "1" = "#2166ac"),
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  row_names_gp = grid::gpar(fontsize = 7),
+  column_names_gp = grid::gpar(fontsize = 7),
+  column_names_rot = 45,
+  column_title = paste0(
+    "Binary selective GO themes | 1 = -log10(FDR) >= ",
+    binary_signal_cutoff
+  )
+)
+
+draw(ht_binary)
+dev.off()
+draw(ht_binary)
+
+```
+
+# Optional row-normalized selective heatmap
+
+This version highlights the strongest themes within each SN. It should not replace the FDR heatmap, but it is useful for visual pattern discovery.
+
+```{r row_scaled_heatmap}
+row_scaled_mat <- heat_mat_selective
+row_scaled_mat <- t(scale(t(row_scaled_mat)))
+row_scaled_mat[is.na(row_scaled_mat)] <- 0
+row_scaled_mat[row_scaled_mat > 2.5] <- 2.5
+row_scaled_mat[row_scaled_mat < -2.5] <- -2.5
+
+pdf(
+  paste0(output_prefix, "_SELECTIVE_rowZ_heatmap.pdf"),
+  width = 15,
+  height = 12
+)
+
+col_fun_z <- circlize::colorRamp2(
+  c(-2.5, 0, 2.5),
+  c("#2166ac", "white", "#b2182b")
+)
+
+ht_z <- Heatmap(
+  row_scaled_mat,
+  name = "Row z-score",
+  col = col_fun_z,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  row_names_gp = grid::gpar(fontsize = 7),
+  column_names_gp = grid::gpar(fontsize = 7),
+  column_names_rot = 45,
+  column_title = "Row-normalized selective GO themes"
+)
+
+draw(ht_z)
+dev.off()
+draw(ht_z)
+
+```
+
+# rrvgo visualization: semantic similarity heatmap and scatter plot
+
+These plots summarize redundancy among GO terms independent of SNs.
+
+```{r rrvgo_plots}
+pdf(paste0(output_prefix, "_rrvgo_semantic_similarity_heatmap.pdf"), width = 12, height = 10)
+rrvgo::heatmapPlot(
+  simMatrix,
+  reducedTerms,
+  annotateParent = TRUE,
+  annotationLabel = "parentTerm",
+  fontsize = 6
+)
+dev.off()
+
+ 
+
+pdf(paste0(output_prefix, "_rrvgo_scatter.pdf"), width = 10, height = 8)
+rrvgo::scatterPlot(
+  simMatrix,
+  reducedTerms)
+dev.off()
+
+ 
+```
+
+# Optional semantic network for one SN
+
+A DAG/network for all 92 SNs is usually too dense. This optional plot is for one selected SN.
+
+```{r selected_SN_network}
+terms_sn <- go_mapped %>%
+  filter(Cluster == selected_SN_for_network) %>%
+  arrange(p.adjust) %>%
+  slice_head(n = selected_SN_top_terms_network)
+
+ids_sn <- unique(terms_sn$ID)
+
+if (length(ids_sn) >= 3) {
+  sim_sn <- simMatrix[ids_sn, ids_sn, drop = FALSE]
+
+  edge_df <- as.data.frame(as.table(sim_sn)) %>%
+    dplyr::rename(from = Var1, to = Var2, similarity = Freq) %>%
+    mutate(
+      from = as.character(from),
+      to = as.character(to)
+    ) %>%
+    filter(
+      from != to,
+      similarity >= selected_SN_similarity_edge_cutoff
+    ) %>%
+    rowwise() %>%
+    mutate(edge_id = paste(sort(c(from, to)), collapse = "__")) %>%
+    ungroup() %>%
+    distinct(edge_id, .keep_all = TRUE) %>%
+    dplyr::select(-edge_id)
+
+  node_df <- terms_sn %>%
+    distinct(ID, Description, p.adjust, representative_term) %>%
+    mutate(
+      neglog10_padj = -log10(pmax(p.adjust, 1e-300)),
+      label = paste0(Description, "\n", ID)
+    )
+
+  g <- graph_from_data_frame(
+    edge_df,
+    vertices = node_df,
+    directed = FALSE
+  )
+
+  p_network <- ggraph(g, layout = "fr") +
+    geom_edge_link(aes(width = similarity), alpha = 0.25, color = "gray50") +
+    geom_node_point(aes(size = neglog10_padj, color = representative_term), alpha = 0.9) +
+    geom_node_text(aes(label = Description), repel = TRUE, size = 3) +
+    scale_edge_width(range = c(0.2, 2)) +
+    theme_void() +
+    theme(legend.position = "right") +
+    ggtitle(paste0(selected_SN_for_network, " GO semantic similarity network"))
+
+  p_network
+
+  ggsave(
+    paste0(output_prefix, "_", selected_SN_for_network, "_semantic_network.pdf"),
+    p_network,
+    width = 12,
+    height = 10
+  )
+} else {
+  message("Not enough GO terms for selected SN network plot.")
+}
+```
+
+# Export summary tables
+
+```{r export_tables}
+sn_top10_themes <- sn_theme %>%
+  arrange(Cluster, best_padj) %>%
+  group_by(Cluster) %>%
+  slice_head(n = 10) %>%
+  ungroup()
+
+sn_stats <- go_sig %>%
+  group_by(Cluster) %>%
+  summarize(
+    n_significant_GO = n_distinct(ID),
+    best_padj = min(p.adjust, na.rm = TRUE),
+    strongest_signal = max(neglog10_padj, na.rm = TRUE),
+    total_hits = sum(Count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(sn_numeric_order(Cluster))
+
+go_to_theme_map <- go_mapped %>%
+  dplyr::select(
+    Cluster,
+    ID,
+    Description,
+    representative_GO,
+    representative_term,
+    p.adjust,
+    neglog10_padj,
+    FoldEnrichment,
+    GeneRatio,
+    GeneRatio_value,
+    Count,
+    GeneNames
+  ) %>%
+  arrange(Cluster, representative_term, p.adjust)
+
+heatmap_matrix_broad_tbl <- heat_mat_broad %>%
+  as.data.frame() %>%
+  rownames_to_column("Cluster")
+
+heatmap_matrix_selective_tbl <- heat_mat_selective %>%
+  as.data.frame() %>%
+  rownames_to_column("Cluster")
+
+binary_matrix_selective_tbl <- binary_mat %>%
+  as.data.frame() %>%
+  rownames_to_column("Cluster")
+
+output_xlsx <- paste0(output_prefix, "_semantic_theme_summary_FULL.xlsx")
+
+writexl::write_xlsx(
+  list(
+    README = tibble(
+      item = c(
+        "input_file",
+        "ontology",
+        "padj_cutoff",
+        "top_n_per_SN",
+        "rrvgo_threshold",
+        "semantic_method",
+        "broad_top_theme_number",
+        "selective_top_theme_number",
+        "selective_min_SN_per_theme",
+        "selective_max_SN_per_theme",
+        "selective_min_max_signal",
+        "binary_signal_cutoff",
+        "main_recommended_figure"
+      ),
+      value = c(
+        input_file,
+        ontology,
+        padj_cutoff,
+        top_n_per_SN,
+        rrvgo_threshold,
+        semantic_method,
+        top_theme_number_broad,
+        top_theme_number_selective,
+        min_SN_per_theme,
+        max_SN_per_theme,
+        min_max_signal,
+        binary_signal_cutoff,
+        paste0(output_prefix, "_SELECTIVE_top", top_theme_number_selective, "_heatmap.pdf")
+      )
+    ),
+    SN_stats = sn_stats,
+    Theme_metrics_all = theme_metrics,
+    Top_themes_broad = top_themes_broad,
+    Top_themes_selective = top_themes_selective,
+    SN_theme_all = sn_theme,
+    SN_top10_themes = sn_top10_themes,
+    GO_to_theme_map = go_to_theme_map,
+    Heatmap_matrix_broad = heatmap_matrix_broad_tbl,
+    Heatmap_matrix_selective = heatmap_matrix_selective_tbl,
+    Binary_matrix_selective = binary_matrix_selective_tbl,
+    RRVGO_reduced_terms = reducedTerms_df,
+    Threshold_diagnostic = threshold_summary
+  ),
+  path = output_xlsx
+)
+
+cat("Wrote:", output_xlsx, "\n")
+```
+
+# Recommended interpretation
+
+For your main figure, use the file ending in:
+
+```{r final_file_names, results='asis'}
+cat("\n")
+cat("Recommended main heatmap PDF: ", paste0(output_prefix, "_SELECTIVE_top", top_theme_number_selective, "_heatmap.pdf"), "\n")
+cat("Recommended binary heatmap PDF: ", paste0(output_prefix, "_SELECTIVE_binary_cutoff", binary_signal_cutoff, "_heatmap.pdf"), "\n")
+cat("Supplemental broad heatmap PDF: ", paste0(output_prefix, "_BROAD_top", top_theme_number_broad, "_heatmap.pdf"), "\n")
+cat("Summary workbook: ", output_xlsx, "\n")
+```
+
+The broad heatmap is useful for showing global biological programs shared across subnetworks. The selective heatmap is better for identifying representative GO themes that distinguish subnetworks from each other.
+
+# Session info
+
+Recording package versions is standard practice for reproducibility, especially for a pipeline with this many Bioconductor dependencies whose outputs (GOSemSim similarity, OrgDb annotations) can shift slightly between versions.
+
+```{r session_info}
+sessionInfo()
+```
