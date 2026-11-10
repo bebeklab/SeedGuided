@@ -3,11 +3,12 @@
 This repository contains the source code, benchmarking pipeline, and dataset processing scripts for the manuscript: **"Seed-Driven Scalable Discovery of Dense Disease Modules for Enhanced Biomarker Identification"**.
 
 ## Overview
-Identifying dense, disease-specific subnetworks within large protein-protein interaction (PPI) networks is crucial for unraveling complex disease mechanisms. While exact global optimization methods, such as Mixed-Integer Quadratic Programming (MIQP), provide rigorous mathematical guarantees, they suffer from a severe $O(N^2)$ combinatorial explosion on modern, dense human interactomes. 
 
-**Seed-Guided Simulated Annealing (SGSA)** is a highly scalable stochastic metaheuristic that entirely bypasses global matrix evaluations. By initiating from a validated set of disease seeds and dynamically exploring local topological neighborhoods, SGSA balances signal enrichment against a strict size penalty to successfully escape local optima. 
+Identifying disease-specific subnetworks within large protein-protein interaction (PPI) networks is a standard approach for understanding disease biology and discovering clinical biomarkers. Exact optimization methods such as Mixed-Integer Quadratic Programming (MIQP) can guarantee dense network modules, but on dense human interactomes global MIQP formulations generate millions of variables and quickly become computationally intractable.
 
-In a comprehensive empirical benchmark across 102 curated diseases on the 12,000-node IntAct interactome, SGSA demonstrated superior biological signal recovery, significantly outperforming classic topological traversals (DIAMOnD), deep learning frameworks (GNN-SubNet), and exact optimization relaxations (SeedMix).
+**SeedMix** is a seed-guided, density-constrained subnetwork discovery method. Instead of evaluating the entire network adjacency matrix at once, SeedMix uses Personalized PageRank to reduce the search space to a biologically relevant neighborhood anchored by known disease seed genes. Within this reduced subgraph, a tractable Mixed-Integer Programming formulation balances topological cohesion against strict size constraints.
+
+SeedMix was benchamrked across 102 curated diseases on the 12,000-node IntAct interactome, where it consistently outperformed established topological methods (DIAMOnD), graph neural networks (GNN-SubNet), and relaxed optimization approaches. SeedMix was also applied to patient-specific gene expression data in glioma, where it identified dysregulated pathways that accurately stratified clinical subgroups.
 
 ## Repository Structure
 * `/pipeline/` - Contains the core `sgsa.py` algorithm alongside wrappers for the baseline methods (DIAMOnD, GNN-SubNet, SeedMix).
