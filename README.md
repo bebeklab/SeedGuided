@@ -1,4 +1,4 @@
-# SeedGuided SA: Seed-Guided Simulated Annealing for Disease Subnetwork Discovery
+# SeedGuided SA: Seed-Driven Scalable Discovery of Dense Disease Modules for Enhanced Biomarker Identification
 
 This repository contains the source code, benchmarking pipeline, and dataset processing scripts for the manuscript: **"Seed-Driven Scalable Discovery of Dense Disease Modules for Enhanced Biomarker Identification"**.
 
